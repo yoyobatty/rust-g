@@ -60,8 +60,7 @@ macro_rules! byond_fn {
             _argc: ::std::os::raw::c_int, _argv: *const *const ::std::os::raw::c_char
         ) -> *const ::std::os::raw::c_char {
             $crate::byond::set_panic_hook();
-            let closure = || ($body);
-            $crate::byond::byond_return(closure().map(From::from))
+            $crate::byond::run_byond_fn(|| ($body))
         }
     };
 
@@ -71,6 +70,7 @@ macro_rules! byond_fn {
         pub unsafe extern "C" fn $name(
             _argc: ::std::os::raw::c_int, _argv: *const *const ::std::os::raw::c_char
         ) -> *const ::std::os::raw::c_char {
+            $crate::byond::set_panic_hook();
             let __args = unsafe { $crate::byond::parse_args(_argc, _argv) };
 
             let mut __argn = 0;
@@ -82,10 +82,23 @@ macro_rules! byond_fn {
                 let $rest = __args.get(__argn..).unwrap_or(&[]);
             )?
 
-            let closure = || ($body);
-            $crate::byond::byond_return(closure().map(From::from))
+            $crate::byond::run_byond_fn(|| ($body))
         }
     };
+}
+
+/// Runs the body of a `byond_fn!` and hands its result to BYOND. A panic in the body is caught
+/// and returned as an error string instead: unwinding out of an `extern "C"` function aborts
+/// the process, which takes Dream Daemon down with it.
+pub fn run_byond_fn<F, T>(body: F) -> *const c_char
+where
+    F: FnOnce() -> Option<T>,
+    T: Into<Vec<u8>>,
+{
+    match catch_panic(std::panic::AssertUnwindSafe(body)) {
+        Ok(value) => byond_return(value.map(Into::into)),
+        Err(error) => byond_return(Some(error.to_string().into_bytes())),
+    }
 }
 
 // Easy version checker. It's in this file so it is always included
@@ -95,7 +108,7 @@ byond_fn!(
     }
 );
 
-/// Print any panics before exiting.
+/// Writes any panic to rustg-panic.log as well as stderr.
 pub fn set_panic_hook() {
     SET_HOOK.call_once(|| {
         let default_panic_handler = std::panic::take_hook();
@@ -166,5 +179,29 @@ where
                     .to_owned(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::{CStr, CString, c_char};
+
+    byond_fn!(fn test_parse_number(text) {
+        Some(text.parse::<u32>().unwrap().to_string())
+    });
+
+    fn call(arg: &str) -> String {
+        let arg = CString::new(arg).unwrap();
+        let argv: [*const c_char; 1] = [arg.as_ptr()];
+        unsafe { CStr::from_ptr(test_parse_number(1, argv.as_ptr())) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn panic_is_returned_as_an_error() {
+        assert_eq!(call("5"), "5");
+        assert!(call("five").starts_with("Panic during function execution: "));
+        assert_eq!(call("6"), "6");
     }
 }
