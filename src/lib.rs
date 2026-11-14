@@ -11,6 +11,8 @@ mod error;
 
 #[cfg(feature = "jobs")]
 mod jobs;
+#[cfg(windows)]
+mod pin;
 
 #[cfg(feature = "acreplace")]
 pub mod acreplace;
